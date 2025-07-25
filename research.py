@@ -14,6 +14,7 @@ Original file is located at
 import os
 import getpass
 import dotenv
+from datetime import datetime, timedelta
 dotenv.load_dotenv()
 os.environ["GOOGLE_API_KEY"] = os.getenv("GOOGLE_API_KEY")
 
@@ -54,23 +55,28 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.messages import AIMessage
 search_classifier_prompt = [
     SystemMessage(content="""
-You are a smart research agent helper.
+You are a smart stock research agent helper.
 
-Your job is to determine whether a user's question needs external research.
+Your job is to determine whether a user's stock-related question needs external search for live market data.
 
 If the question asks about:
-- Recent events
-- Unknown facts
-- Definitions or explanations not previously mentioned
+- Current stock prices, market cap, or financial metrics
+- Recent earnings, news, or market events
+- Stock analysis, performance, or comparisons
+- Market trends, sectors, or economic indicators
+- Any real-time stock market information
 
 → Return: `needs_search = true`
 
 If the question is about:
-- Previous conversation (e.g. "What did I just ask?")
-- Greetings or small talk (e.g. "what's up?")
-- Reflections or meta-questions
+- Previous conversation (e.g. "What stock did I just ask about?")
+- Greetings or small talk (e.g. "hello", "thanks")
+- General investment concepts already discussed
+- Clarification of previous recommendations
 
 → Return: `needs_search = false`
+
+Remember: For stock information, we almost always need fresh, live data from external sources.
 """)
 ]
 
@@ -92,12 +98,27 @@ tavily_search = TavilySearchResults(max_results=3)
 
 def search_web(state):
   """retrives docs from web search """
-  tavily_search=TavilySearchResults(max_results=3)
-  search_docs= tavily_search.invoke(state["question"])
+  tavily_search=TavilySearchResults(max_results=6)
+  now = datetime.now()
+  three_days_ago = now - timedelta(days=3)
+    
+  now_str = now.strftime('%Y-%m-%d %H:%M')
+  past_str = three_days_ago.strftime('%Y-%m-%d %H:%M')
+  original_question = state["question"]
+  enhanced_query = (
+        f"{original_question} updates, prices, or news from {past_str} to {now_str}, "
+        f"latest market activity, recent performance past 72 hours"
+    )
+  print(enhanced_query)
+  search_docs= tavily_search.invoke(enhanced_query)
+  
+
+
+
 
   formatted_search_docs = "\n\n---\n\n".join(
         [
-            f'<Document href="{doc["url"]}">\n{doc["content"]}\n</Document>'
+            f'<Document href="{doc["url"]}">\n{doc["content"]}\n\n**SOURCE URL: {doc["url"]}**\n</Document>'
             for doc in search_docs
         ]
     )
@@ -105,10 +126,10 @@ def search_web(state):
 
 def search_wiki(state):
   """retrives docs from wiki search """
-  search_docs= WikipediaLoader( query= state["question"],load_max_docs=2).load()
+  search_docs= WikipediaLoader( query= state["question"],load_max_docs=6).load()
   formatted_search_docs = "\n\n---\n\n".join(
         [
-            f'<Document source="{doc.metadata["source"]}" page="{doc.metadata.get("page", "")}">\n{doc.page_content}\n</Document>'
+            f'<Document source="{doc.metadata["source"]}" page="{doc.metadata.get("page", "")}">\n{doc.page_content}\n\n**SOURCE URL: {doc.metadata["source"]}**\n</Document>'
             for doc in search_docs
         ]
     )
@@ -120,26 +141,43 @@ def generate_ans(state):
   question= state["question"]
   needs_search= state["needs_search"]
   messages = state.get("messages", [])
-  print("\n--- DEBUG INFO ---")
-  print("Question:", question)
-  print("Needs Search:", needs_search)
-  print("Context (type):", type(context))
-  # print("Context:", context if context else "[EMPTY]")
-  print("Messages (before):", [m.content for m in messages])
 
   # Initialize variables for streaming
   full_response = ""
 
   if needs_search:
-    print("🔍 Found relevant information, generating answer...")
-    system_message = SystemMessage(content=f"Answer the question {question} using this context: {context}")
+    print("📈 Fetching live stock market data...")
+    current_date = datetime.now().strftime('%B %d, %Y')
+    system_message = SystemMessage(content=f"""
+You are an expert Stock Market Analyst and Investment Advisor. 
+
+Based on the following LIVE market data and context: {context}
+
+Provide a comprehensive stock analysis for the question: {question}
+
+Your response should include:
+1. **Current Market Data**: TODAY'S ({current_date}) latest prices, closing prices, changes, volume if available. If today's data isn't available, use the MOST RECENT closing price and specify the date.
+2. **Financial Analysis**: Key metrics like P/E ratio, market cap, revenue trends
+3. **Based on Recent News**: Analyze the MOST RECENT news and events affecting this stock. Explain how recent developments, earnings reports, product launches, partnerships, regulatory changes, or market sentiment are impacting the stock's performance. Focus on news from the last few days/weeks.
+4. **Technical Analysis**: Price trends, support/resistance levels if relevant  
+5. **Investment Recommendation**: BUY/HOLD/SELL with clear reasoning
+6. **Risk Assessment**: Potential risks and opportunities
+7. **Price Targets**: Short-term and long-term projections if possible
+8. **Sources**: Include all source links at the end for verification
+
+Use LIVE, UP-TO-DATE information from the provided context. Be specific with numbers, dates, and sources.
+Prioritize getting TODAY'S closing price or the most recent available closing price.
+Format your response clearly with headers and bullet points for easy reading.
+
+IMPORTANT: At the end of your response, include only some best 6 "📚 Sources:" section with all the URLs and links from the provided context so users can verify the information and read more details.
+""")
     messages = messages+[system_message]
     
     # Stream the response
-    print("\n🤖 AI Assistant: ", end="", flush=True)
+    print("\n📊 Stock Analyst: ", end="", flush=True)
     for chunk in llm.stream([
         system_message,
-        HumanMessage(content="Answer the question.")
+        HumanMessage(content="Provide comprehensive stock analysis and recommendations.")
     ]):
         if chunk.content:
             print(chunk.content, end="", flush=True)
@@ -147,12 +185,18 @@ def generate_ans(state):
     print()  # New line after streaming
     
   else:
-    print("💭 Using conversation context...")
+    print("💬 Using previous stock discussion...")
+    # Add stock context to conversation-based responses
+    stock_context_message = SystemMessage(content="""
+You are a Stock Market Expert. When answering questions about previous conversations, 
+maintain your role as a financial advisor. Keep responses focused on stock market topics,
+investment advice, and financial analysis. Be helpful and professional.
+""")
     human_message = HumanMessage(content=question)
-    messages = messages+[human_message]
+    messages = [stock_context_message] + messages + [human_message]
     
     # Stream the response
-    print("\n🤖 AI Assistant: ", end="", flush=True)
+    print("\n📊 Stock Analyst: ", end="", flush=True)
     for chunk in llm.stream(messages):
         if chunk.content:
             print(chunk.content, end="", flush=True)
@@ -206,47 +250,51 @@ graph = builder.compile(checkpointer=memory)
 # display(Image(graph.get_graph().draw_mermaid_png()))
 
 def main():
-    """Main interactive function to get user input and process questions"""
-    config = {"configurable": {"thread_id": "user_session"}}
+    """Main interactive function to get user input and process stock questions"""
+    config = {"configurable": {"thread_id": "stock_session"}}
     
-    print("🔍 Welcome to the Research Assistant!")
-    print("Ask me anything, and I'll search for information or use our conversation history.")
+    print("📈 Welcome to the Live Stock Market Research Assistant!")
+    print("🔴 LIVE MARKET DATA | 📊 EXPERT ANALYSIS | 💡 INVESTMENT RECOMMENDATIONS")
+    print("Ask me about any stock, market trends, or investment advice.")
     print("Type 'quit', 'exit', or 'bye' to end the session.\n")
+    print("🔥 Try asking:")
+    print("   • 'What's the current price of AAPL stock?'")
+    print("   • 'Should I buy Tesla stock now?'")
+    print("   • 'Compare NVIDIA vs AMD stocks'")
+    print("   • 'What are the best tech stocks to buy?'\n")
     
     while True:
         try:
             # Get user input
-            user_question = input("❓ Your question: ").strip()
+            user_question = input("📈 Your stock question: ").strip()
             
             # Check for exit commands
             if user_question.lower() in ['quit', 'exit', 'bye', 'q']:
-                print("👋 Goodbye! Thanks for using the Research Assistant!")
+                print("💰 Happy Trading! Thanks for using the Stock Research Assistant!")
                 break
             
             # Skip empty questions
             if not user_question:
-                print("Please enter a question.")
+                print("Please enter a stock market question.")
                 continue
             
-            print(f"\n🤔 Processing your question: '{user_question}'")
-            print("-" * 50)
+            print(f"\n🔍 Analyzing: '{user_question}'")
+            print("-" * 60)
             
             # Process the question through the graph
             result = graph.invoke({"question": user_question}, config=config)
             
-            # Display the conversation
-            # print("\n💬 Conversation:")
-            # for message in result['messages']:
-            #     message.pretty_print()
-            
-            print("\n" + "="*70 + "\n")
+            # The streaming already happened in generate_ans, so we just need to show completion
+            print(f"\n✅ Analysis completed!")
+            print("💡 Remember: This is not financial advice. Always do your own research!")
+            print("\n" + "="*80 + "\n")
             
         except KeyboardInterrupt:
-            print("\n\n👋 Session interrupted. Goodbye!")
+            print("\n\n💰 Session interrupted. Happy Trading!")
             break
         except Exception as e:
             print(f"❌ An error occurred: {e}")
-            print("Please try again with a different question.\n")
+            print("Please try again with a different stock question.\n")
 
 if __name__ == "__main__":
     main()
