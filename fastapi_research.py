@@ -106,7 +106,7 @@ def search_web(state):
         f"{original_question} updates, prices, or news from {past_str} to {now_str}, "
         f"latest market activity, recent performance past 72 hours"
     )
-  print(enhanced_query)
+  # print(enhanced_query)  # Removed to prevent backend noise during streaming
   search_docs= tavily_search.invoke(enhanced_query)
   
   formatted_search_docs = "\n\n---\n\n".join(
@@ -207,27 +207,29 @@ Question: {question}
     messages =messages + [human_message]
     final_messages = messages
 
-  # Handle streaming vs non-streaming
+  # Always stream - single unified approach
+  # Make ONE LLM call to avoid different responses
+  llm_response = list(llm.stream(final_messages))
+  print(llm_response)
+  
   if stream:
-    # Return generator for streaming
-    def stream_generator():
-        for chunk in llm.stream(final_messages):
-            if chunk.content:
-                yield chunk.content
-    return stream_generator()
+      # Return generator for streaming
+      def stream_generator():
+          for chunk in llm_response:
+              if chunk.content:
+                  print(chunk.content)
+                  yield chunk.content
+      return stream_generator()
   else:
-    # Original non-streaming behavior
-    print("\n📊 Stock Analyst: ", end="", flush=True)
-    for chunk in llm.stream(final_messages):
-        if chunk.content:
-            print(chunk.content, end="", flush=True)
-            full_response += chunk.content
-    print()  # New line after streaming
-
-    return {
-        "answer": full_response,  # get the full streamed response
-        "messages": messages + [AIMessage(content=full_response)]
-    }
+      # Accumulate all chunks for non-streaming
+      full_response = ""
+      for chunk in llm_response:
+          if chunk.content:
+              full_response += chunk.content
+  return {
+          "answer": full_response,
+          "messages": messages + [AIMessage(content=full_response)]
+      }
 
 # EXACT COPY of route_based_on_search function from research.py
 def route_based_on_search(state) -> str:
@@ -326,6 +328,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel as FastAPIBaseModel
 import re
 import json
+import asyncio
 
 # Initialize FastAPI app
 app = FastAPI(title="Stock Market Research API", version="1.0.0")
@@ -342,7 +345,7 @@ app.add_middleware(
 # FastAPI Pydantic models
 class QuestionRequest(FastAPIBaseModel):
     question: str
-    conversation_context: list = []
+    # conversation_context removed - graph handles memory automatically with MemorySaver
 
 class StockAnalysisResponse(FastAPIBaseModel):
     question: str
@@ -366,61 +369,11 @@ async def health_check():
     """Simple health check"""
     return {"status": "healthy", "timestamp": datetime.now().isoformat()}
 
-@app.post("/analyze", response_model=StockAnalysisResponse)
-async def analyze_stock(request: QuestionRequest):
-    """
-    Main endpoint to analyze stock market questions using EXACT same logic as research.py
-    """
-    try:
-        question = request.question.strip()
-        
-        if not question:
-            raise HTTPException(status_code=400, detail="Question cannot be empty")
-        
-        # Use EXACT same config as original
-        config = {"configurable": {"thread_id": "stock_session"}}
-        
-        print(f"\n🔍 API Analyzing: '{question}'")
-        print("-" * 60)
-        
-        # Add conversation context if available
-        context_messages = []
-        if request.conversation_context:
-            for msg in request.conversation_context[-4:]:  # Last 2 exchanges
-                if msg['type'] == 'user':
-                    context_messages.append(HumanMessage(content=msg['content']))
-                elif msg['type'] == 'ai':
-                    context_messages.append(AIMessage(content=msg['content']))
-        
-        # Process the question through the EXACT same graph workflow
-        result = graph.invoke({"question": question, "messages": context_messages}, config=config)
-        
-        # Extract data from result (same structure as original)
-        answer = result.get("answer", "")
-        needs_search = result.get("needs_search", False)
-        
-        # Extract sources from the answer
-        sources = extract_sources_from_answer(answer)
-        
-        print(f"\n✅ API Analysis completed!")
-        print("💡 Remember: This is not financial advice. Always do your own research!")
-        print("\n" + "="*80 + "\n")
-        
-        return StockAnalysisResponse(
-            question=question,
-            answer=answer,
-            needs_search=needs_search,
-            sources_used=sources
-        )
-        
-    except Exception as e:
-        print(f"❌ An error occurred: {e}")
-        raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
 
 @app.post("/analyze/stream")
 async def analyze_stock_stream(request: QuestionRequest):
     """
-    Streaming endpoint that sends analysis chunks as they're generated
+    Streaming endpoint that sends analysis chunks as they're generated using graph.stream()
     """
     try:
         question = request.question.strip()
@@ -431,78 +384,86 @@ async def analyze_stock_stream(request: QuestionRequest):
         async def generate_stream():
             try:
                 # Send initial status
-                yield f"data: {json.dumps({'type': 'status', 'content': 'Starting analysis...'})}\n\n"
+                yield f"data: {json.dumps({'type': 'status', 'content': 'Thinking...'})}\n\n"
                 
-                # Prepare conversation context
-                context_messages = []
-                if request.conversation_context:
-                    for msg in request.conversation_context[-4:]:  # Last 2 exchanges
-                        if msg['type'] == 'user':
-                            context_messages.append(HumanMessage(content=msg['content']))
-                        elif msg['type'] == 'ai':
-                            context_messages.append(AIMessage(content=msg['content']))
+                # Small delay to ensure frontend connects
+                await asyncio.sleep(0.1)
                 
-                # Check if search is needed
-                question_state = {"question": question, "messages": context_messages}
-                decision_result = check(question_state)
-                needs_search = decision_result["needs_search"]
+                # Use same config as regular endpoint - graph handles memory automatically  
+                config = {"configurable": {"thread_id": "stock_session"}}
+                # print(f"🔍 API Processing: '{question}'")  # Debug removed
                 
-                yield f"data: {json.dumps({'type': 'metadata', 'needs_search': needs_search})}\n\n"
-                
+                # Get the workflow state up to generate_answer, then stream the final response
+                full_response = ""
+                needs_search = False
                 context = []
                 
-                # Perform search if needed
-                if needs_search:
-                    yield f"data: {json.dumps({'type': 'status', 'content': 'Fetching live market data...'})}\n\n"
-                    
-                    web_result = search_web({"question": question})
-                    context.extend(web_result["context"])
-                    
-                    yield f"data: {json.dumps({'type': 'status', 'content': 'Searching additional sources...'})}\n\n"
-                    
-                    wiki_result = search_wiki({"question": question})
-                    context.extend(wiki_result["context"])
-                
-                yield f"data: {json.dumps({'type': 'status', 'content': 'Generating analysis...'})}\n\n"
-                
-                # Use existing generate_ans function with streaming
-                state = {
-                    "question": question,
-                    "context": context,
-                    "needs_search": needs_search,
-                    "messages": context_messages
-                }
-                
-                # Get streaming generator from generate_ans
-                stream_generator = generate_ans(state, stream=True)
-                
-                # Stream the response
-                full_response = ""
-                for chunk in stream_generator:
-                    full_response += chunk
-                    yield f"data: {json.dumps({'type': 'content', 'content': chunk})}\n\n"
+                # Process through the graph until we reach generate_answer
+                for chunk in graph.stream({"question": question}, config=config):
+                    for node_name, node_output in chunk.items():
+                        if node_name == "check":
+                            needs_search = node_output.get("needs_search", False)
+                            yield f"data: {json.dumps({'type': 'metadata', 'needs_search': needs_search})}\n\n"
+                            await asyncio.sleep(0.1)
+                            
+                        elif node_name == "search_web":
+                            yield f"data: {json.dumps({'type': 'status', 'content': 'Fetching live market data...'})}\n\n"
+                            await asyncio.sleep(0.1)
+                            if "context" in node_output:
+                                context.extend(node_output["context"])
+                            
+                        elif node_name == "search_wikipedia":
+                            yield f"data: {json.dumps({'type': 'status', 'content': 'Searching additional sources...'})}\n\n"
+                            await asyncio.sleep(0.1)
+                            if "context" in node_output:
+                                context.extend(node_output["context"])
+                            
+                        elif node_name == "generate_answer":
+                            yield f"data: {json.dumps({'type': 'status', 'content': 'Generating...'})}\n\n"
+                            await asyncio.sleep(0.1)
+                            
+                            # Now use the REAL streaming from generate_ans
+                            state = {
+                                "question": question,
+                                "context": context,
+                                "needs_search": needs_search,
+                                "messages": node_output.get("messages", [])
+                            }
+                            
+                            # Get the streaming generator from generate_ans
+                            stream_generator = generate_ans(state, stream=True)
+                            
+                            # Stream each chunk as it comes with proper async yielding
+                            for chunk_content in stream_generator:
+                                full_response += chunk_content
+                                yield f"data: {json.dumps({'type': 'content', 'content': chunk_content})}\n\n"
+                                # Small delay to prevent buffering and ensure real-time streaming
+                                await asyncio.sleep(0.01)
                 
                 # Extract sources from final response
                 sources = extract_sources_from_answer(full_response)
                 
                 # Send completion
                 yield f"data: {json.dumps({'type': 'complete', 'sources': sources})}\n\n"
+                await asyncio.sleep(0.1)
                 
             except Exception as e:
                 yield f"data: {json.dumps({'type': 'error', 'content': str(e)})}\n\n"
         
         return StreamingResponse(
             generate_stream(),
-            media_type="text/plain",
+            media_type="text/event-stream",
             headers={
-                "Cache-Control": "no-cache",
+                "Cache-Control": "no-cache, no-store, must-revalidate",
                 "Connection": "keep-alive",
-                "Content-Type": "text/plain; charset=utf-8"
+                "Content-Type": "text/event-stream",
+                "X-Accel-Buffering": "no",  # Disable nginx buffering
+                "Access-Control-Allow-Origin": "*",
             }
         )
         
     except Exception as e:
-        print(f"❌ An error occurred: {e}")
+        # print(f"❌ An error occurred: {e}")  # Removed to prevent backend noise
         raise HTTPException(status_code=500, detail=f"Streaming analysis failed: {str(e)}")
 
 if __name__ == "__main__":

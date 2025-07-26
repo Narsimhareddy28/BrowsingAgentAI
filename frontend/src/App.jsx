@@ -52,24 +52,19 @@ function App() {
       needs_search: false,
       sources: [],
       timestamp: new Date().toISOString(),
-      status: 'Starting analysis...'
+      status: 'Thinking...'
     }
 
     setMessages(prev => [...prev, aiMessage])
 
     try {
-      // Get recent conversation context (last 3 messages for context)
-      const recentMessages = messages.slice(-6).filter(msg => msg.type !== 'error').map(msg => ({
-        type: msg.type,
-        content: msg.type === 'user' ? msg.content : msg.content.substring(0, 500) // Truncate AI responses
-      }))
-
+      // Graph handles conversation context automatically with MemorySaver
       const response = await fetch('http://localhost:8000/analyze/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
-          question: currentInput,
-          conversation_context: recentMessages
+          question: currentInput
+          // conversation_context removed - graph handles memory automatically
         }),
       })
 
@@ -95,6 +90,27 @@ function App() {
                 setMessages(prev => prev.map(msg => 
                   msg.id === aiMessageId 
                     ? { ...msg, status: data.content }
+                    : msg
+                ))
+              } else if (data.type === 'thinking_start') {
+                // Start thinking mode
+                setMessages(prev => prev.map(msg => 
+                  msg.id === aiMessageId 
+                    ? { ...msg, thinking: '', status: 'Thinking...', showThinking: true }
+                    : msg
+                ))
+              } else if (data.type === 'thinking') {
+                // Append thinking content
+                setMessages(prev => prev.map(msg => 
+                  msg.id === aiMessageId 
+                    ? { ...msg, thinking: (msg.thinking || '') + data.content }
+                    : msg
+                ))
+              } else if (data.type === 'thinking_end') {
+                // End thinking mode
+                setMessages(prev => prev.map(msg => 
+                  msg.id === aiMessageId 
+                    ? { ...msg, status: 'Now analyzing...' }
                     : msg
                 ))
               } else if (data.type === 'metadata') {
@@ -234,7 +250,7 @@ function App() {
   return (
     <div className="min-h-screen bg-gray-900 text-white">
       {/* Simple Header */}
-      <header className="border-b border-gray-800 px-6 py-4">
+      <header className=" px-6 py-4">
         <div className="flex items-center justify-between max-w-6xl mx-auto">
           <div className="flex items-center space-x-2">
             <span className="text-2xl">📈</span>
@@ -288,7 +304,7 @@ function App() {
                   {message.type === 'user' ? (
                     // User Message
                     <div className="flex justify-end">
-                      <div className="bg-blue-500 text-white rounded-2xl px-4 py-3 max-w-2xl">
+                      <div className="bg-gray-800 text-white rounded-2xl px-4 py-3 max-w-2xl">
                         {message.content}
                       </div>
                     </div>
@@ -302,9 +318,9 @@ function App() {
                                      ) : (
                      // AI Message
                      <div className="flex justify-start">
-                       <div className="bg-gray-800 rounded-2xl px-4 py-3 max-w-4xl">
+                       <div className=" rounded-2xl px-4 py-3 max-w-4xl">
                          <div className="flex items-center space-x-2 mb-3 text-sm">
-                           <span className="text-blue-400">🤖 Stock Research AI</span>
+                           <span className="text-blue-400 font-regular"> Stock Research AI</span>
                            {message.needs_search && (
                              <span className="px-2 py-1 bg-blue-500/20 text-blue-400 rounded text-xs">
                                📊 Live Data
@@ -323,6 +339,9 @@ function App() {
                              <span className="text-sm">{message.status}</span>
                            </div>
                          )}
+
+                         {/* Show thinking process */}
+                        
 
                          {/* Message content */}
                          {message.content && (
@@ -385,7 +404,7 @@ function App() {
               <div ref={messagesEndRef} />
             </div>
           )}
-        </div>
+      </div>
 
         {/* Simple Input */}
         <div className="border-t border-gray-800 px-6 py-4">
@@ -405,7 +424,7 @@ function App() {
                 className="px-6 py-3 bg-blue-500 hover:bg-blue-600 disabled:bg-gray-600 disabled:cursor-not-allowed text-white rounded-xl transition-colors"
               >
                 {loading ? '...' : 'Send'}
-              </button>
+        </button>
             </form>
             
             {/* Simple Tips */}
